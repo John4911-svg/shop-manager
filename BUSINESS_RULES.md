@@ -14,7 +14,6 @@ This document defines the exact business logic, constraints, and financial calcu
 - **Product must have a unit**: A text field describing the unit of measurement (e.g., "kg", "litre", "piece").
 - **Product must have cost price**: Non-negative integer in smallest currency unit; defines the cost to acquire one unit.
 - **Product must have selling price**: Non-negative integer in smallest currency unit; defines the price charged to customers.
-- **Product must have initial stock quantity**: Non-negative real number representing available inventory.
 - **Cost price cannot be invalid**: Must be zero or greater (`cost_price >= 0`).
 - **Selling price cannot be invalid**: Must be zero or greater (`selling_price >= 0`).
 - **Stock cannot incorrectly become negative**: Inventory quantity must never fall below zero (`stock_quantity >= 0`).
@@ -24,6 +23,10 @@ This document defines the exact business logic, constraints, and financial calcu
 - **Product can be deactivated**: A product has an `is_active` flag (0 or 1). Deactivated products cannot be added to new sales.
 - **Historical sales remain after product deactivation**: Deactivating a product does NOT delete or modify its past sales records. Sales preserve their historical unit prices and unit costs at the time of sale.
 - **Only active products can be sold**: When creating a sale, the application must check `is_active = 1` before allowing the product to be added to the cart.
+
+### Product Stock Quantity
+
+- **Product stock quantity**: A product's stock quantity must be a non-negative quantity. A new product may begin with zero stock; if opening stock is provided, it must be recorded through an OPENING stock movement.
 
 ### Price History
 
@@ -59,12 +62,20 @@ Every stock movement must record:
 
 ### Stock Change Rules
 
-- **Opening stock increases inventory**: A new product with initial stock 25 creates a `STOCK_MOVEMENTS` record with `movement_type = 'OPENING'`, `quantity = 25`, `quantity_before = 0`, `quantity_after = 25`.
+- **Opening stock increases inventory**: A new product with initial stock 25 creates a `stock_movements` record with `movement_type = 'OPENING'`, `quantity = 25`, `quantity_before = 0`, `quantity_after = 25`.
 - **Restocking increases inventory**: When inventory is replenished, create a `RESTOCK` movement.
 - **Sale decreases inventory**: When a sale is completed, create a `SALE` movement with a negative quantity, and set `reference_id` to the `sales.id`.
 - **Adjustment changes inventory**: Manual inventory corrections (e.g., theft, damage) create an `ADJUSTMENT` movement with a positive or negative quantity and a `reason`.
-- **Every stock change creates a movement record**: No stock update to the `products` table is permitted without a corresponding entry in `stock_movements`.
+- **Every stock change creates a movement record**: No stock update to the `products` table is permitted without a corresponding entry in `stock_movements`. Every legitimate stock change creates exactly one corresponding stock movement.
 - **Stock cannot become negative**: The application must validate that `quantity_after >= 0` before committing any stock movement.
+
+### Stock Status
+
+A product's stock status is determined as follows:
+
+- **OUT OF STOCK**: `stock_quantity = 0`
+- **LOW STOCK**: `stock_quantity > 0` and `stock_quantity <= reorder_level`
+- **NORMAL**: `stock_quantity > reorder_level`
 
 ---
 
@@ -141,6 +152,14 @@ Every stock movement must record:
   Gross Profit = SUM(sale_item.profit for all sale_items)
   ```
 
+### Profit Margin
+
+- **Profit margin calculation defined**: Gross profit divided by revenue, expressed as a percentage.
+  ```
+  Profit Margin = (Gross Profit / Revenue) × 100
+  ```
+  If Revenue = 0, Profit Margin is 0% and division by zero must be prevented.
+
 ### Expenses
 
 - **Expense calculation defined**: Expenses are business costs recorded separately from sales (e.g., rent, utilities, wages).
@@ -199,6 +218,7 @@ Every stock movement must record:
    total_amount = subtotal = 24000
    total_cost = unit_cost * quantity = 8000 * 2 = 16000
    gross_profit = total_amount - total_cost = 24000 - 16000 = 8000
+   profit_margin = (gross_profit / total_amount) * 100 = (8000 / 24000) * 100 = 33.33%
    ```
    (Or equivalently: `gross_profit = SUM(profit) = 8000`)
 
@@ -245,6 +265,7 @@ Every stock movement must record:
 | **Sale Total Amount** | `SUM(sale_item.subtotal)` | Total revenue of the sale |
 | **Sale Total Cost** | `SUM(unit_cost × quantity)` | Total cost of goods in the sale |
 | **Sale Gross Profit** | `total_amount − total_cost` | Profit before expenses |
+| **Profit Margin** | `(gross_profit / total_amount) × 100` | Profitability as percentage |
 | **Stock After Sale** | `stock_before − quantity_sold` | Remaining inventory |
 | **Total Expenses (Period)** | `SUM(expense.amount)` | All business expenses for a time period |
 | **Net Profit (Period)** | `gross_profit − total_expenses` | Bottom-line profit after all costs |
@@ -284,20 +305,25 @@ The application must validate and enforce:
 - A sale cannot be finalized if it contains zero items.
 - A product cannot be added to a sale if `is_active = 0`.
 - A product cannot be sold if the requested quantity exceeds `stock_quantity`.
-- Stock movements must have unique (product_id, movement_type, created_at, quantity) combinations to prevent accidental duplicates.
+- Duplicate prevention of stock movements should be handled through correct transaction and application logic.
 - Passwords are hashed before storage (never stored in plain text).
 
 ---
 
-## 8. Scope Freeze (V1)
+## 8. V1 Scope: In & Out
 
-### In Scope
+### In Scope (V1)
 
 - Single-user login and basic authentication.
 - CRUD operations for products, categories, and expenses.
 - Sales cart and sale finalization.
 - Stock tracking with movement history.
-- Financial reporting (revenue, COGS, gross profit, net profit).
+- **Business Dashboard** with real-time KPIs.
+- **Daily Sales and Profit Reports**.
+- **Product Profitability Reports**.
+- **Stock Reports** (inventory levels, movement history).
+- **Low-Stock and Out-of-Stock Alerts**.
+- Financial reporting (revenue, COGS, gross profit, net profit, profit margin).
 - Local SQLite database.
 - Offline operation.
 - Data backup capability.
@@ -309,7 +335,8 @@ The application must validate and enforce:
 - Payment gateway integration.
 - Tax calculations.
 - Supplier management.
-- Advanced reporting (dashboards, trends).
+- Advanced trends and predictive analytics.
+- Forecasting.
 - Mobile app.
 - Cloud synchronization.
 - Invoice generation.
@@ -339,8 +366,10 @@ Shop Manager V1 is a **single-user, offline-first** shop inventory and sales sys
 - ✅ Strict financial integrity (no floating-point, atomic transactions).
 - ✅ Complete product lifecycle (creation, pricing, deactivation, historical tracking).
 - ✅ Automatic stock management with audit trails.
-- ✅ Precise profit calculations (revenue − COGS − expenses).
+- ✅ Precise profit calculations (revenue − COGS − expenses − profit margin).
+- ✅ Real-time business dashboard and reporting.
+- ✅ Low-stock and out-of-stock alerts.
 - ✅ Data persistence in a local SQLite database.
 - ✅ No partial transactions (all-or-nothing sales).
 
-It is **designed to serve a single shop operator** who needs reliable, accurate financial records and inventory tracking without internet or external services.
+It is **designed to serve a single shop operator** who needs reliable, accurate financial records, inventory tracking, and business reporting without internet or external services.
