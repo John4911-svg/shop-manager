@@ -2,7 +2,7 @@
 
 ## Overview
 
-Shop Manager V1 is a single-user, offline-first desktop/web application built around a local SQLite database. It is designed to manage products, inventory, sales, expenses, and business reporting without requiring network access or a remote service.
+Shop Manager V1 is a single-user, offline-first desktop application built with PySide6 and backed by SQLite. It is designed to manage products, inventory, sales, expenses, and business reporting without requiring network access or a remote service.
 
 The system is intentionally simple, reliable, and auditable. Every important business action must be stored in the database and must be consistent with the frozen V1 business rules.
 
@@ -10,11 +10,12 @@ The system is intentionally simple, reliable, and auditable. Every important bus
 
 ## 1. Architectural Principles
 
-### 1.1 Offline-first
+### 1.1 Offline-first desktop architecture
 
-- The application runs locally and stores all business data in SQLite.
+- The application runs locally on the machine and stores all business data in SQLite.
 - There is no dependency on a remote database or online payment system.
 - Data persists after application shutdown and restart.
+- The application is a local desktop experience, not a web application.
 
 ### 1.2 Single responsibility by layer
 
@@ -22,8 +23,9 @@ The system is separated into clear layers:
 
 - UI layer: user interaction and display
 - Business logic layer: validation, calculations, rules, workflows
-- Data access layer: database read/write operations
-- SQLite database layer: tables, constraints, indexes, transactions
+- Service layer: orchestration of business actions and transaction ownership
+- Repository/data-access layer: database read/write operations
+- Database layer: tables, constraints, indexes, transactions
 
 ### 1.3 Data integrity first
 
@@ -54,7 +56,7 @@ Responsible for:
 - Showing dashboard/report data
 - Handling user login and application navigation
 
-The UI layer does not own business rules. It may call business logic, but it must not directly mutate the database for critical business operations.
+The UI layer does not own business rules. It may call the service layer, but it must not directly mutate the database for critical business operations.
 
 ### Example responsibilities
 
@@ -84,48 +86,149 @@ Responsible for:
 - enforcing business rules
 - calculating totals, gross profit, net profit, and profit margin
 - determining stock status (normal, low stock, out of stock)
-- controlling the sale transaction workflow
 - protecting historical prices and data consistency
 
-This layer sits between the UI and database access layer.
+This layer sits between the UI and service layer.
 
 ### Business logic responsibilities
 
-- Validate a sale before transaction starts
+- Validate a sale before the transaction starts
 - Confirm product exists and is active
 - Confirm quantity is valid and available in stock
 - Verify payment method is valid
 - Compute sale item totals and sale totals
 - Decide stock updates for each product
-- Create stock movement entries for approved inventory changes
 - Generate dashboard/report aggregates from database records
 
 ---
 
-## 2.3 Data Access Layer
+## 2.3 Service Layer
+
+The service layer is responsible for transaction orchestration and business workflow control.
+
+This is the layer that decides:
+
+- when a transaction starts
+- which repository operations belong inside the transaction
+- whether the transaction commits or rolls back
+- which errors are returned to the UI
+
+This is especially important for the complete-sale workflow.
+
+### Example service responsibilities
+
+- `AuthService`: login and authentication workflow
+- `ProductService`: product validation and inventory management workflows
+- `CategoryService`: category management workflows
+- `InventoryService`: stock updates, adjustments, and stock status logic
+- `SalesService`: complete sale workflow including validation and transaction coordination
+- `ExpenseService`: expense validation and recording
+- `ReportService`: dashboard and financial reporting queries
+- `BackupService`: backup and restore operations
+
+### Service ownership of sales transaction
+
+The `SalesService` owns the full sale transaction. It is the orchestration point for the entire operation.
+
+Flow:
+
+User finalizes cart
+        ↓
+SalesService
+        ↓
+Validate sale
+        ↓
+BEGIN TRANSACTION
+        ↓
+Repositories perform database operations
+        ↓
+COMMIT
+        ↓
+Return successful result to UI
+
+On failure:
+
+SalesService
+        ↓
+ROLLBACK
+        ↓
+Return controlled error to UI
+
+This makes the architecture explicit and keeps transaction control out of the repository layer.
+
+---
+
+## 2.4 Repository / Data-Access Layer
 
 Responsible for:
 
 - database connection management
 - SQL execution
-- schema creation and migration awareness
 - CRUD operations for tables
-- transaction control
+- transaction-aware data operations when called by a service
 - querying business data for reports and dashboards
 
-The data access layer should isolate SQL details from business logic.
+The repository layer performs the actual database operations using the connection/transaction supplied by the service.
 
-### Responsibilities
+### Relationship between Service and Repository
 
-- open/close SQLite connection
-- prepare SQL inserts/updates/selects
-- run transactions
-- read products, sales, expenses, stock movements
-- return database records in a business-friendly format
+The intended structure is:
+
+SalesService
+    ↓
+BEGIN TRANSACTION
+    ↓
+SaleRepository
+ProductRepository
+StockMovementRepository
+    ↓
+COMMIT / ROLLBACK
+
+### Repository responsibilities
+
+- `UserRepository`: user lookup and persistence
+- `ProductRepository`: product lookup, update, stock adjustment
+- `CategoryRepository`: category CRUD
+- `SaleRepository`: sale header creation and sale retrieval
+- `StockMovementRepository`: stock movement creation
+- `ExpenseRepository`: expense CRUD
+
+Repositories do not decide business transaction boundaries. They execute database work within the transaction the service controls.
 
 ---
 
-## 2.4 Database Layer
+## 2.5 Model Layer
+
+The model layer represents the application's core business data.
+
+V1 models correspond primarily to:
+
+- `User`
+- `Category`
+- `Product`
+- `Sale`
+- `SaleItem`
+- `StockMovement`
+- `Expense`
+
+### Model responsibilities
+
+- Hold structured business data
+- Validate basic object-level rules
+- Expose fields in a straightforward Python data structure
+- Represent information that is persisted in SQLite
+
+### Important rules
+
+- Models hold data and simple validation logic only.
+- Models do not contain UI behavior.
+- Models do not orchestrate database transactions.
+- Models do not bypass the service layer to mutate the database.
+- Keep this layer simple. Do not introduce an ORM merely because a model layer exists.
+
+---
+
+## 2.6 Database Layer
 
 Responsible for:
 
@@ -214,89 +317,51 @@ The database layer should provide a clean, narrow interface to the rest of the a
 - `get_profit_report()`
 - `get_stock_report()`
 
-The business logic should call these methods rather than writing SQL directly.
+The business service layer should call repositories, instead of directly writing ad hoc SQL across the whole app.
 
-This keeps the database access layer stable and reduces duplication.
+This keeps the repository layer stable and reduces duplication.
 
----
+### Intended structure
 
-## 5. Transaction Boundary
+Services
+ ├── AuthService
+ ├── ProductService
+ ├── CategoryService
+ ├── InventoryService
+ ├── SalesService
+ ├── ExpenseService
+ ├── ReportService
+ └── BackupService
 
-The most critical architectural rule in V1 is the transaction boundary around a sale.
-
-### Transaction Start Condition
-
-A sale transaction begins only after all validations pass.
-
-### Required validations before transaction start
-
-- Cart is not empty
-- Every product exists
-- Every product is active
-- Every quantity is greater than 0
-- Quantity requested does not exceed available stock
-- Selling price and cost price are available for each item
-- Payment method is valid
-- Sale totals can be computed without error
-
-### Transaction operations
-
-Inside the transaction, the system must perform these steps together:
-
-1. Create the `sales` row
-2. Create each `sale_items` row
-3. Update each `products.stock_quantity`
-4. Create corresponding `stock_movements` records of type `SALE`
-5. Compute and store `sales.subtotal`, `sales.total_amount`, `sales.total_cost`, and `sales.gross_profit`
-6. Commit transaction
-
-### Rollback condition
-
-If any step fails after the transaction begins:
-
-- SQL error occurs
-- stock validation fails unexpectedly
-- data cannot be inserted or updated consistently
-- stock movement cannot be created
-- any business rule is violated
-
-Then:
-
-- rollback transaction
-- no sale record remains
-- no sale items remain
-- no stock changes remain
-- no stock movement remains
-
-This atomicity protects the integrity of the entire sales process.
+Repositories
+ ├── UserRepository
+ ├── ProductRepository
+ ├── CategoryRepository
+ ├── SaleRepository
+ ├── StockMovementRepository
+ └── ExpenseRepository
 
 ---
 
-## 6. Sale Workflow
+## 5. Sale Workflow
 
-## 6.1 End-to-End Flow
+## 5.1 End-to-End Flow
 
 User finalizes cart
         ↓
+SalesService
+        ↓
 Validate sale
         ↓
-BEGIN DATABASE TRANSACTION
+BEGIN TRANSACTION
         ↓
-Create sales record
-        ↓
-Create sale_items records
-        ↓
-Update product stock quantities
-        ↓
-Create SALE stock_movements
-        ↓
-Calculate/store sale totals and gross profit
+Repositories perform database operations
         ↓
 COMMIT TRANSACTION
         ↓
 Sale successfully completed
 
-## 6.2 Validation Workflow
+## 5.2 Validation Workflow
 
 Before the transaction begins, the application must verify:
 
@@ -311,7 +376,7 @@ Before the transaction begins, the application must verify:
 
 Only after all checks pass should the database transaction open.
 
-## 6.3 Stock Update Workflow
+## 5.3 Stock Update Workflow
 
 For every sold product:
 
@@ -342,9 +407,9 @@ This guarantees historical financial accuracy.
 
 ---
 
-## 7. Stock Workflow
+## 6. Stock Workflow
 
-## 7.1 General Stock Logic
+## 6.1 General Stock Logic
 
 Product stock changes only through controlled business events:
 
@@ -360,7 +425,7 @@ Each stock event must:
 - create a `stock_movements` row
 - update the product's `stock_quantity`
 
-## 7.2 Stock Status Logic
+## 6.2 Stock Status Logic
 
 A product's status is derived from the live `stock_quantity` and `reorder_level` values.
 
@@ -372,9 +437,9 @@ This is used for alerts and stock report generation.
 
 ---
 
-## 8. Financial Workflow
+## 7. Financial Workflow
 
-## 8.1 Sale Finance Logic
+## 7.1 Sale Finance Logic
 
 For each sale item:
 
@@ -393,7 +458,7 @@ Gross Profit = Revenue - COGS
 
 The values are stored in the `sales` record and preserved for reporting.
 
-## 8.2 Expense Logic
+## 7.2 Expense Logic
 
 Expenses are tracked separately from sales:
 
@@ -402,7 +467,7 @@ Total Expenses = SUM(expense.amount)
 Net Profit = Gross Profit - Total Expenses
 ```
 
-## 8.3 Profit Margin Logic
+## 7.3 Profit Margin Logic
 
 Profit margin is calculated as:
 
@@ -414,7 +479,7 @@ If Revenue = 0, Profit Margin is 0% and division by zero must be prevented.
 
 ---
 
-## 9. Reporting and Dashboard Architecture
+## 8. Reporting and Dashboard Architecture
 
 The dashboard and reporting features must read from the database instead of ephemeral in-memory values.
 
@@ -442,9 +507,9 @@ This keeps reporting consistent with the actual saved business state.
 
 ---
 
-## 10. Rollback Behavior and Error Handling
+## 9. Rollback Behavior and Error Handling
 
-## 10.1 Transaction Failure
+## 9.1 Transaction Failure
 
 If any critical error happens after the transaction begins:
 
@@ -456,7 +521,7 @@ If any critical error happens after the transaction begins:
 
 This ensures the system never ends in a partial sale state.
 
-## 10.2 Validation Failure
+## 9.2 Validation Failure
 
 Validation failures happen before the transaction begins. These errors should not open a database transaction.
 
@@ -469,12 +534,34 @@ Examples:
 - insufficient stock
 - unsupported payment method
 
-## 10.3 Operational Rules
+## 9.3 Operational Rules
 
 - No database operation should silently ignore failure.
 - Business errors should surface to the user clearly.
 - Critical writes must be done within a transaction boundary.
 - The application should log or expose the failed reason for debugging.
+
+---
+
+## 10. Logging Strategy
+
+V1 uses Python's standard `logging` module.
+
+The application should log:
+
+- application startup and shutdown
+- successful and failed authentication attempts
+- important business operations
+- successful and failed sales
+- stock adjustments
+- backup and restore operations
+- unexpected application/database errors
+
+### Logging constraints
+
+- Logs must never contain plaintext passwords, password hashes, or other sensitive authentication data.
+- Business data remains in SQLite; logs are for diagnostics and operational troubleshooting, not as a replacement for database records.
+- Logs should be concise, structured where practical, and safe for local troubleshooting.
 
 ---
 
@@ -495,24 +582,23 @@ The UI should not:
 - manipulate stock quantities directly
 - create sales rows without transaction handling
 
-## 11.2 Business Logic vs Database Access
+## 11.2 Service vs Repository
 
-Business logic should decide what is valid and what must happen, but it should not embed raw SQL when a data access layer can handle it.
+Business logic should decide what is valid and what must happen, but it should not embed raw SQL when a repository can handle it.
 
-The data access layer should handle:
+The repository layer should handle:
 
 - queries
 - row mapping
 - inserting/updating database records
-- transaction execution
+- transaction-aware execution when called by a service
 
-Business logic should handle:
+The service layer should handle:
 
-- validation rules
-- sale calculation rules
-- stock status rules
-- reporting calculations
-- rollback triggers
+- validation flows
+- sale orchestration
+- transaction start/commit/rollback
+- business error handling
 
 ---
 
@@ -552,11 +638,12 @@ The architecture must ensure:
 The V1 architecture is intentionally narrow and reliable:
 
 - SQLite is the database source of truth
-- business rules live in a business logic layer
-- database access is isolated behind a data layer
+- business rules live in the service/business layer
+- repositories handle database persistence
 - the UI remains focused on user interaction
 - sales are atomic and complete or rolled back entirely
 - stock changes are always audited with `stock_movements`
 - financial reporting is driven by stored records, not UI state
+- Python logging supports operational visibility without exposing sensitive data
 
 This architecture is designed to support the frozen V1 requirements without introducing complexity or unapproved features.
