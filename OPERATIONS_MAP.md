@@ -19,11 +19,29 @@ The goal is to remove ambiguity before implementation begins.
 ### 1.1 Layer ownership
 
 - The UI collects input and displays results.
-- The Service decides the business workflow and owns transaction orchestration.
-- The Repository performs SQL work inside the service-controlled transaction.
+- The Service Layer is the application-level implementation of the business workflows and rules defined in BUSINESS_RULES.md.
+- The separate “Business Logic” concept refers to the rules and calculations defined in the business rules document; these rules are enforced primarily by the Service Layer, with database constraints providing an additional integrity boundary.
+- The Repository/Data-Access Layer performs SQL work inside the service-controlled transaction.
 - The Database stores the actual data and enforces constraints.
 
-### 1.2 Transaction rule
+### 1.2 Service-to-repository flow
+
+The architecture is:
+
+UI
+ ↓
+Services
+   └── enforce business rules / calculations / workflows
+ ↓
+Repositories
+ ↓
+Database
+ ↓
+SQLite
+
+This means the Service Layer owns the application logic and transaction orchestration. Repositories do not independently decide when a sale starts or commits.
+
+### 1.3 Transaction rule
 
 Operations that modify multiple tables or business records must be handled in a service-owned transaction.
 
@@ -49,6 +67,7 @@ This includes:
 - ExpenseService
 - ReportService
 - BackupService
+- SettingsService
 
 ### Repositories
 
@@ -58,6 +77,7 @@ This includes:
 - SaleRepository
 - StockMovementRepository
 - ExpenseRepository
+- SettingsRepository / settings persistence interface
 
 ### Database tables involved
 
@@ -68,6 +88,8 @@ This includes:
 - sale_items
 - stock_movements
 - expenses
+
+Note: Application settings are part of V1 scope, but they do not require a new SQLite table in the frozen schema. The settings persistence mechanism can be decided at the settings implementation checkpoint.
 
 ---
 
@@ -149,7 +171,19 @@ This includes:
 | Transaction | No |
 | Notes | Can optionally filter by category or active status. |
 
-### 4.4 Update product
+### 4.4 Search/filter products
+
+| Field | Value |
+| --- | --- |
+| Operation | Search/filter products |
+| UI Layer | Search/filter controls |
+| Service | ProductService.search_products(search_term, category_id=None, active_only=True) |
+| Repository | ProductRepository.search(search_term, category_id=None, active_only=True) |
+| Tables | products, categories |
+| Transaction | No |
+| Notes | Used for product lookup in a busy sales workflow and inventory management screens. |
+
+### 4.5 Update product
 
 | Field | Value |
 | --- | --- |
@@ -161,7 +195,7 @@ This includes:
 | Transaction | No |
 | Notes | Price updates are allowed; historical sale records remain unchanged because sale_items stores price snapshots. |
 
-### 4.5 Deactivate product
+### 4.6 Deactivate product
 
 | Field | Value |
 | --- | --- |
@@ -173,7 +207,7 @@ This includes:
 | Transaction | No |
 | Notes | Historical sales remain untouched. Deactivated products cannot be sold in new sales. |
 
-### 4.6 Reorder level update
+### 4.7 Reorder level update
 
 | Field | Value |
 | --- | --- |
@@ -365,6 +399,30 @@ This includes:
 | Transaction | No |
 | Notes | Used for daily reporting and sales history. |
 
+### 7.7 Sales history filtering
+
+| Field | Value |
+| --- | --- |
+| Operation | Search/filter sales history |
+| UI Layer | Sales filters and search controls |
+| Service | SalesService.search_sales(date_from=None, date_to=None, payment_method=None, sale_number=None) |
+| Repository | SaleRepository.search(date_from=None, date_to=None, payment_method=None, sale_number=None) |
+| Tables | sales |
+| Transaction | No |
+| Notes | Used to filter transactions and support reports. |
+
+### 7.8 Generate/print receipt
+
+| Field | Value |
+| --- | --- |
+| Operation | Generate/print receipt |
+| UI Layer | Receipt view / print action |
+| Service | SalesService.generate_receipt(sale_id) |
+| Repository | SaleRepository.get_by_id(sale_id), SaleRepository.get_items_by_sale_id(sale_id), ProductRepository.get_by_id(product_id) |
+| Tables | sales, sale_items, products |
+| Transaction | No |
+| Notes | Receipt generation reads the committed sale; it does not create or modify the sale. |
+
 ---
 
 ## 8. Expense Operations
@@ -403,7 +461,7 @@ This includes:
 | Repository | ExpenseRepository.delete_by_id(expense_id) |
 | Tables | expenses |
 | Transaction | No |
-| Notes | If deletion is allowed in V1, it should be controlled as a business action. If not allowed, update documentation accordingly. |
+| Notes | V1 supports expense deletion as part of expense CRUD. The service must validate that the expense exists before deletion. No need for a multi-table transaction because only expenses is affected. |
 
 ---
 
@@ -511,12 +569,41 @@ This includes:
 
 ---
 
-## 11. Operation Summary Matrix
+## 11. Application Settings Operations
+
+### 11.1 Read settings
+
+| Field | Value |
+| --- | --- |
+| Operation | Read application settings |
+| UI Layer | Settings screen |
+| Service | SettingsService.get_settings() |
+| Repository | SettingsRepository.get_settings() or settings persistence interface |
+| Tables | Not part of frozen SQLite schema yet |
+| Transaction | No |
+| Notes | The exact persistence mechanism is to be decided later. This does not require a new SQLite table in V1 unless the implementation checkpoint decides otherwise. |
+
+### 11.2 Update settings
+
+| Field | Value |
+| --- | --- |
+| Operation | Update application settings |
+| UI Layer | Settings form |
+| Service | SettingsService.update_settings(changes) |
+| Repository | SettingsRepository.update_settings(changes) or settings persistence interface |
+| Tables | Not part of frozen SQLite schema yet |
+| Transaction | No |
+| Notes | Keep this out of the core business database unless later implementation requires it. |
+
+---
+
+## 12. Operation Summary Matrix
 
 | Operation | UI | Service | Repository | Tables | Transaction |
 | --- | --- | --- | --- | --- | --- |
 | Login | yes | AuthService | UserRepository | users | no |
 | Create product | yes | ProductService | ProductRepository | products | no |
+| Search/filter products | yes | ProductService | ProductRepository | products, categories | no |
 | Update product | yes | ProductService | ProductRepository | products | no |
 | Deactivate product | yes | ProductService | ProductRepository | products | no |
 | Create category | yes | CategoryService | CategoryRepository | categories | no |
@@ -526,16 +613,21 @@ This includes:
 | Add to cart | yes | SalesService | ProductRepository | products | no |
 | Validate sale | yes | SalesService | ProductRepository | products | no |
 | Complete sale | yes | SalesService | SaleRepository + ProductRepository + StockMovementRepository | sales, sale_items, products, stock_movements | yes |
+| Sales history filtering | yes | SalesService | SaleRepository | sales | no |
+| Generate/print receipt | yes | SalesService | SaleRepository + ProductRepository | sales, sale_items, products | no |
 | Record expense | yes | ExpenseService | ExpenseRepository | expenses | no |
+| Delete expense | yes | ExpenseService | ExpenseRepository | expenses | no |
 | Daily sales report | yes | ReportService | SaleRepository | sales | no |
 | Daily profit report | yes | ReportService | SaleRepository + ExpenseRepository | sales, sale_items, expenses | no |
 | Product profitability report | yes | ReportService | SaleRepository + ProductRepository | sales, sale_items, products | no |
 | Stock report | yes | ReportService | ProductRepository + StockMovementRepository | products, stock_movements | no |
 | Backup database | yes | BackupService | backup interface | all tables | no |
+| Read settings | yes | SettingsService | SettingsRepository | settings persistence mechanism | no |
+| Update settings | yes | SettingsService | SettingsRepository | settings persistence mechanism | no |
 
 ---
 
-## 12. Final Architecture Rule
+## 13. Final Architecture Rule
 
 The service layer owns the business flow and transaction boundary.
 
@@ -553,7 +645,7 @@ This separation ensures:
 
 ---
 
-## 13. Implementation Guidance
+## 14. Implementation Guidance
 
 Implementation should follow this order:
 
